@@ -1,0 +1,4 @@
+.build/
+DerivedData/
+Package.resolved
+.swiftpm/
