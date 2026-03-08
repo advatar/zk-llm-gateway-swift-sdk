@@ -72,6 +72,39 @@ let response = try await client.chatCompletions(
 print(response.firstText() ?? "")
 ```
 
+## Drop-in app wrapper
+
+If your Swift app wants an env-driven integration layer instead of wiring
+`GatewayClient` manually, use `AppGatewayConfig`.
+
+Environment variables:
+
+- `GATEWAY_BASE_URL` or `GATEWAY_URL` - base URL for the gateway or relay host
+- `GATEWAY_PUBLIC_KEY_B64` - base64 X25519 gateway public key
+- `GATEWAY_TICKETS_JSON` or `TICKETS_JSON` - JSON file containing pre-issued tickets
+- `GATEWAY_USE_DUMMY_TICKETS=true` - development-only fallback
+- `GATEWAY_INFER_PATH=/relay` or `GATEWAY_USE_RELAY=true` - send ciphertext through the relay
+- `GATEWAY_MODEL` or `MODEL` - default model name, defaults to `gpt-4o-mini`
+- `GATEWAY_TOKEN_CLASS` or `TOKEN_CLASS` - defaults to `c2048`
+- `GATEWAY_TEMPERATURE` - optional default temperature
+- `GATEWAY_TIMEOUT_SECS` - optional request timeout, defaults to `60`
+- `GATEWAY_AUTH_BEARER` - optional bearer token
+
+```swift
+import Foundation
+import ZKLLMGatewaySDK
+
+let gateway = try AppGatewayConfig.fromEnvironment().build()
+let answer = try await gateway.askWithSystem(
+    "You are a helpful assistant.",
+    userPrompt: "Summarize our privacy model."
+)
+
+print(answer)
+```
+
+For a complete executable example, see `Examples/app_gateway.swift`.
+
 ## Ticket Sources
 
 Dummy tickets:

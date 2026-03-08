@@ -3,10 +3,12 @@ import Foundation
 public struct ChatMessage: Codable, Equatable, Sendable {
     public var role: String
     public var content: String
+    public var extra: [String: JSONValue]
 
-    public init(role: String, content: String) {
+    public init(role: String, content: String, extra: [String: JSONValue] = [:]) {
         self.role = role
         self.content = content
+        self.extra = extra
     }
 
     public static func system(_ content: String) -> ChatMessage {
@@ -19,6 +21,50 @@ public struct ChatMessage: Codable, Equatable, Sendable {
 
     public static func assistant(_ content: String) -> ChatMessage {
         ChatMessage(role: "assistant", content: content)
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: AnyCodingKey.self)
+        role = try container.decode(String.self, forKey: AnyCodingKey("role"))
+
+        if let contentString = try container.decodeIfPresent(String.self, forKey: AnyCodingKey("content")) {
+            content = contentString
+        } else if let contentJSON = try container.decodeIfPresent(JSONValue.self, forKey: AnyCodingKey("content")) {
+            switch contentJSON {
+            case .null:
+                content = ""
+            default:
+                content = jsonValueString(contentJSON)
+            }
+        } else {
+            content = ""
+        }
+
+        let known = Set(["role", "content"])
+        var extraFields: [String: JSONValue] = [:]
+        for key in container.allKeys where !known.contains(key.stringValue) {
+            extraFields[key.stringValue] = try container.decode(JSONValue.self, forKey: key)
+        }
+        extra = extraFields
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: AnyCodingKey.self)
+        try container.encode(role, forKey: AnyCodingKey("role"))
+        try container.encode(content, forKey: AnyCodingKey("content"))
+
+        for (key, value) in extra {
+            try container.encode(value, forKey: AnyCodingKey(key))
+        }
+    }
+
+    public func toJSONValue() -> JSONValue {
+        .object(
+            [
+                "role": .string(role),
+                "content": .string(content),
+            ].merging(extra, uniquingKeysWith: { _, new in new })
+        )
     }
 }
 
@@ -81,7 +127,7 @@ public struct ChatCompletionsRequest: Codable, Equatable, Sendable {
         .object(
             [
                 "model": .string(model),
-                "messages": .array(messages.map { .object(["role": .string($0.role), "content": .string($0.content)]) }),
+                "messages": .array(messages.map { $0.toJSONValue() }),
             ]
             .merging(temperature.map { ["temperature": .number($0)] } ?? [:], uniquingKeysWith: { _, new in new })
             .merging(maxTokens.map { ["max_tokens": .number(Double($0))] } ?? [:], uniquingKeysWith: { _, new in new })
@@ -234,5 +280,21 @@ public struct ChatCompletionsResponse: Codable, Equatable, Sendable {
             }
         }
         return nil
+    }
+}
+
+private func jsonValueString(_ value: JSONValue) -> String {
+    switch value {
+    case let .string(string):
+        return string
+    case .null:
+        return ""
+    default:
+        guard let data = try? value.toData(),
+              let string = String(data: data, encoding: .utf8)
+        else {
+            return ""
+        }
+        return string
     }
 }

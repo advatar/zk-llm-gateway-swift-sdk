@@ -94,15 +94,7 @@ public final class GatewayClient {
         }
 
         let chatRequest = try parseChatRequest(from: upstream)
-        let payload = InferenceRequest(
-            requestID: UUID().uuidString.lowercased(),
-            model: chatRequest.model,
-            messages: chatRequest.messages,
-            maxTokens: chatRequest.maxTokens,
-            temperature: chatRequest.temperature,
-            tokenClass: tokenClass,
-            ticket: ticket
-        )
+        let payload = try buildInferenceRequest(tokenClass: tokenClass, ticket: ticket, request: chatRequest)
 
         let sealed = try sealJSON(
             gatewayPublicKey: gatewayPublicKey,
@@ -190,6 +182,17 @@ public final class GatewayClient {
            object["output"]?.stringValue != nil,
            object["request_id"]?.stringValue != nil {
             let inferenceResponse = try responseJSON.decode(InferenceResponse.self)
+            if let upstream = inferenceResponse.upstream {
+                let body = upstream["body"] ?? upstream
+                if body.objectValue != nil {
+                    var response = try body.decode(ChatCompletionsResponse.self)
+                    response.extra["billed_token_class"] = .string(inferenceResponse.billedTokenClass.rawValue)
+                    response.id = response.id ?? inferenceResponse.requestID
+                    response.model = response.model ?? inferenceResponse.model
+                    return response
+                }
+            }
+
             return ChatCompletionsResponse(
                 id: inferenceResponse.requestID,
                 model: inferenceResponse.model,
@@ -226,17 +229,25 @@ private struct InferenceRequest: Encodable, Sendable {
     let messages: [ChatMessage]
     let maxTokens: Int?
     let temperature: Double?
+    let stream: Bool?
     let tokenClass: TokenClass
     let ticket: ZkTicket
+    let extra: [String: JSONValue]
 
-    enum CodingKeys: String, CodingKey {
-        case requestID = "request_id"
-        case model
-        case messages
-        case maxTokens = "max_tokens"
-        case temperature
-        case tokenClass = "token_class"
-        case ticket
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: AnyCodingKey.self)
+        try container.encode(requestID, forKey: AnyCodingKey("request_id"))
+        try container.encode(model, forKey: AnyCodingKey("model"))
+        try container.encode(messages, forKey: AnyCodingKey("messages"))
+        try container.encodeIfPresent(maxTokens, forKey: AnyCodingKey("max_tokens"))
+        try container.encodeIfPresent(temperature, forKey: AnyCodingKey("temperature"))
+        try container.encodeIfPresent(stream, forKey: AnyCodingKey("stream"))
+        try container.encode(tokenClass, forKey: AnyCodingKey("token_class"))
+        try container.encode(ticket, forKey: AnyCodingKey("ticket"))
+
+        for (key, value) in extra {
+            try container.encode(value, forKey: AnyCodingKey(key))
+        }
     }
 }
 
@@ -245,12 +256,14 @@ private struct InferenceResponse: Codable, Sendable {
     let model: String
     let output: String
     let billedTokenClass: TokenClass
+    let upstream: JSONValue?
 
     enum CodingKeys: String, CodingKey {
         case requestID = "request_id"
         case model
         case output
         case billedTokenClass = "billed_token_class"
+        case upstream
     }
 }
 
@@ -292,6 +305,32 @@ private func parseChatRequest(from upstream: JSONValue) throws -> ChatCompletion
 
     throw ZKLLMGatewayError.protocolViolation(
         "unsupported inferJSON payload; expected chat request body or {path:'/v1/chat/completions', body:{...}}"
+    )
+}
+
+private func buildInferenceRequest(
+    tokenClass: TokenClass,
+    ticket: ZkTicket,
+    request: ChatCompletionsRequest
+) throws -> InferenceRequest {
+    if request.stream == true {
+        throw ZKLLMGatewayError.protocolViolation("stream=true is not supported on /v1/infer")
+    }
+
+    let extra = request.extra.filter { key, _ in
+        !["request_id", "token_class", "ticket"].contains(key)
+    }
+
+    return InferenceRequest(
+        requestID: UUID().uuidString.lowercased(),
+        model: request.model,
+        messages: request.messages,
+        maxTokens: request.maxTokens,
+        temperature: request.temperature,
+        stream: request.stream,
+        tokenClass: tokenClass,
+        ticket: ticket,
+        extra: extra
     )
 }
 
