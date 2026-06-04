@@ -61,14 +61,14 @@ public final class Redactor {
             (
                 .email,
                 try! NSRegularExpression(
-                    pattern: "\\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\\.[A-Z]{2,}\\b",
+                    pattern: "\\b[A-Z0-9._%+-]+@(?:[A-Z0-9-]+\\.)+[A-Z]{2,}\\b",
                     options: [.caseInsensitive]
                 )
             ),
             (
                 .phone,
                 try! NSRegularExpression(
-                    pattern: "\\b\\+?[0-9][0-9() \\-]{7,}[0-9]\\b",
+                    pattern: "(?<!\\w)\\+?(?:[0-9][0-9(). \\-]*){7,}[0-9](?!\\w)",
                     options: []
                 )
             ),
@@ -177,7 +177,7 @@ public final class Redactor {
         }
 
         let digest = SHA256.hash(data: input)
-        let shortHex = digest.prefix(6).map { String(format: "%02x", $0) }.joined()
+        let shortHex = digest.prefix(16).map { String(format: "%02x", $0) }.joined()
         return "<\(kind.rawValue)_\(shortHex)>"
     }
 }

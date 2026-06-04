@@ -35,6 +35,8 @@ public struct GatewayPublicKey: Equatable, Sendable {
 public struct Envelope: Codable, Equatable, Sendable {
     public var version: Int
     public var tokenClass: TokenClass
+    public var requestID: String
+    public var clientNonceBase64: String
     public var ephemeralPublicKeyBase64: String
     public var nonceBase64: String
     public var ciphertextBase64: String
@@ -42,12 +44,16 @@ public struct Envelope: Codable, Equatable, Sendable {
     public init(
         version: Int,
         tokenClass: TokenClass,
+        requestID: String,
+        clientNonceBase64: String,
         ephemeralPublicKeyBase64: String,
         nonceBase64: String,
         ciphertextBase64: String
     ) {
         self.version = version
         self.tokenClass = tokenClass
+        self.requestID = requestID
+        self.clientNonceBase64 = clientNonceBase64
         self.ephemeralPublicKeyBase64 = ephemeralPublicKeyBase64
         self.nonceBase64 = nonceBase64
         self.ciphertextBase64 = ciphertextBase64
@@ -70,6 +76,8 @@ public struct Envelope: Codable, Equatable, Sendable {
 
         self.version = version
         self.tokenClass = try container.decode(TokenClass.self, forKey: AnyCodingKey("token_class"))
+        self.requestID = try container.decodeIfPresent(String.self, forKey: AnyCodingKey("request_id")) ?? ""
+        self.clientNonceBase64 = try container.decodeIfPresent(String.self, forKey: AnyCodingKey("client_nonce_b64")) ?? ""
         self.ephemeralPublicKeyBase64 = eph
         self.nonceBase64 = try container.decodeIfPresent(String.self, forKey: AnyCodingKey("nonce_b64")) ?? ""
         self.ciphertextBase64 = try container.decodeIfPresent(String.self, forKey: AnyCodingKey("ciphertext_b64")) ?? ""
@@ -79,6 +87,8 @@ public struct Envelope: Codable, Equatable, Sendable {
         var container = encoder.container(keyedBy: AnyCodingKey.self)
         try container.encode(version, forKey: AnyCodingKey("v"))
         try container.encode(tokenClass, forKey: AnyCodingKey("token_class"))
+        try container.encode(requestID, forKey: AnyCodingKey("request_id"))
+        try container.encode(clientNonceBase64, forKey: AnyCodingKey("client_nonce_b64"))
         try container.encode(ephemeralPublicKeyBase64, forKey: AnyCodingKey("eph_pubkey_b64"))
         try container.encode(nonceBase64, forKey: AnyCodingKey("nonce_b64"))
         try container.encode(ciphertextBase64, forKey: AnyCodingKey("ciphertext_b64"))
@@ -89,6 +99,9 @@ public struct SealState: Sendable {
     public let tokenClass: TokenClass
 
     let ephemeralPublicKey: Data
+    let gatewayPublicKey: Data
+    let requestID: String
+    let clientNonce: Data
     let requestKey: Data
     let responseKey: Data
 }
@@ -98,12 +111,30 @@ enum KeyDirection: UInt8, Sendable {
     case response = 2
 }
 
-func makeAAD(version: Int, tokenClass: TokenClass, direction: KeyDirection) -> Data {
-    Data([UInt8(version & 0xFF), tokenClass.id, direction.rawValue])
+func makeAAD(
+    version: Int,
+    tokenClass: TokenClass,
+    direction: KeyDirection,
+    requestID: String,
+    clientNonce: Data,
+    ephemeralPublicKey: Data,
+    gatewayPublicKey: Data
+) -> Data {
+    var aad = bindingMaterial(
+        label: "zk-llm-gateway-envelope-aad-v2",
+        version: version,
+        tokenClass: tokenClass,
+        requestID: requestID,
+        clientNonce: clientNonce,
+        ephemeralPublicKey: ephemeralPublicKey,
+        gatewayPublicKey: gatewayPublicKey
+    )
+    aad.append(direction.rawValue)
+    return aad
 }
 
 func hkdfInfo(tokenClass: TokenClass, direction: KeyDirection) -> Data {
-    var info = Data("zk-llm-gateway-envelope-v1".utf8)
+    var info = Data("zk-llm-gateway-envelope-v2".utf8)
     info.append(contentsOf: direction == .request ? "/req".utf8 : "/resp".utf8)
     info.append(tokenClass.id)
     return info
@@ -112,15 +143,76 @@ func hkdfInfo(tokenClass: TokenClass, direction: KeyDirection) -> Data {
 func deriveKey(
     sharedSecret: SharedSecret,
     tokenClass: TokenClass,
-    direction: KeyDirection
+    direction: KeyDirection,
+    requestID: String,
+    clientNonce: Data,
+    ephemeralPublicKey: Data,
+    gatewayPublicKey: Data
 ) -> Data {
     let symmetricKey = sharedSecret.hkdfDerivedSymmetricKey(
         using: SHA256.self,
-        salt: Data(repeating: 0, count: 32),
+        salt: bindingSalt(
+            version: 2,
+            tokenClass: tokenClass,
+            requestID: requestID,
+            clientNonce: clientNonce,
+            ephemeralPublicKey: ephemeralPublicKey,
+            gatewayPublicKey: gatewayPublicKey
+        ),
         sharedInfo: hkdfInfo(tokenClass: tokenClass, direction: direction),
         outputByteCount: 32
     )
     return symmetricKey.withUnsafeBytes { Data($0) }
+}
+
+private func bindingSalt(
+    version: Int,
+    tokenClass: TokenClass,
+    requestID: String,
+    clientNonce: Data,
+    ephemeralPublicKey: Data,
+    gatewayPublicKey: Data
+) -> Data {
+    let material = bindingMaterial(
+        label: "zk-llm-gateway-envelope-kdf-v2",
+        version: version,
+        tokenClass: tokenClass,
+        requestID: requestID,
+        clientNonce: clientNonce,
+        ephemeralPublicKey: ephemeralPublicKey,
+        gatewayPublicKey: gatewayPublicKey
+    )
+    return Data(SHA256.hash(data: material))
+}
+
+private func bindingMaterial(
+    label: String,
+    version: Int,
+    tokenClass: TokenClass,
+    requestID: String,
+    clientNonce: Data,
+    ephemeralPublicKey: Data,
+    gatewayPublicKey: Data
+) -> Data {
+    var material = Data(label.utf8)
+    material.append(UInt8(version & 0xFF))
+    material.append(tokenClass.id)
+    material.append(Data(requestID.utf8))
+    material.append(clientNonce)
+    material.append(ephemeralPublicKey)
+    material.append(gatewayPublicKey)
+    return material
+}
+
+private func requestID(from rawPayload: Data) throws -> String {
+    guard
+        let object = try JSONSerialization.jsonObject(with: rawPayload) as? [String: Any],
+        let requestID = object["request_id"] as? String,
+        let uuid = UUID(uuidString: requestID)
+    else {
+        throw ZKLLMGatewayError.protocolViolation("request_id is required for encrypted envelopes")
+    }
+    return uuid.uuidString.lowercased()
 }
 
 public func sealJSON<T: Encodable>(
@@ -128,24 +220,50 @@ public func sealJSON<T: Encodable>(
     tokenClass: TokenClass,
     payload: T
 ) throws -> (envelope: Envelope, state: SealState) {
-    let version = 1
+    let version = 2
 
     let rawPayload = try JSONEncoder().encode(payload)
+    let requestID = try requestID(from: rawPayload)
     let paddedPayload = try padPayload(rawPayload, targetLength: tokenClass.requestPaddedLength)
 
     let ephemeralPrivateKey = Curve25519.KeyAgreement.PrivateKey()
     let ephemeralPublicKey = ephemeralPrivateKey.publicKey.rawRepresentation
     let sharedSecret = try ephemeralPrivateKey.sharedSecretFromKeyAgreement(with: gatewayPublicKey.keyAgreementPublicKey)
+    let clientNonce = randomBytes(count: 32)
 
-    let requestKey = deriveKey(sharedSecret: sharedSecret, tokenClass: tokenClass, direction: .request)
-    let responseKey = deriveKey(sharedSecret: sharedSecret, tokenClass: tokenClass, direction: .response)
+    let requestKey = deriveKey(
+        sharedSecret: sharedSecret,
+        tokenClass: tokenClass,
+        direction: .request,
+        requestID: requestID,
+        clientNonce: clientNonce,
+        ephemeralPublicKey: ephemeralPublicKey,
+        gatewayPublicKey: gatewayPublicKey.rawRepresentation
+    )
+    let responseKey = deriveKey(
+        sharedSecret: sharedSecret,
+        tokenClass: tokenClass,
+        direction: .response,
+        requestID: requestID,
+        clientNonce: clientNonce,
+        ephemeralPublicKey: ephemeralPublicKey,
+        gatewayPublicKey: gatewayPublicKey.rawRepresentation
+    )
     let nonceData = randomNonceData()
 
     let sealedBox = try ChaChaPoly.seal(
         paddedPayload,
         using: SymmetricKey(data: requestKey),
         nonce: try ChaChaPoly.Nonce(data: nonceData),
-        authenticating: makeAAD(version: version, tokenClass: tokenClass, direction: .request)
+        authenticating: makeAAD(
+            version: version,
+            tokenClass: tokenClass,
+            direction: .request,
+            requestID: requestID,
+            clientNonce: clientNonce,
+            ephemeralPublicKey: ephemeralPublicKey,
+            gatewayPublicKey: gatewayPublicKey.rawRepresentation
+        )
     )
 
     let ciphertext = sealedBox.ciphertext + sealedBox.tag
@@ -154,6 +272,8 @@ public func sealJSON<T: Encodable>(
         envelope: Envelope(
             version: version,
             tokenClass: tokenClass,
+            requestID: requestID,
+            clientNonceBase64: clientNonce.base64EncodedString(),
             ephemeralPublicKeyBase64: ephemeralPublicKey.base64EncodedString(),
             nonceBase64: nonceData.base64EncodedString(),
             ciphertextBase64: ciphertext.base64EncodedString()
@@ -161,6 +281,9 @@ public func sealJSON<T: Encodable>(
         state: SealState(
             tokenClass: tokenClass,
             ephemeralPublicKey: ephemeralPublicKey,
+            gatewayPublicKey: gatewayPublicKey.rawRepresentation,
+            requestID: requestID,
+            clientNonce: clientNonce,
             requestKey: requestKey,
             responseKey: responseKey
         )
@@ -168,8 +291,12 @@ public func sealJSON<T: Encodable>(
 }
 
 public func openJSON(_ envelope: Envelope, state: SealState) throws -> JSONValue {
-    guard envelope.version == 1 else {
+    guard envelope.version == 2 else {
         throw ZKLLMGatewayError.crypto("unsupported envelope version")
+    }
+
+    guard envelope.requestID == state.requestID else {
+        throw ZKLLMGatewayError.crypto("request_id mismatch")
     }
 
     guard envelope.tokenClass == state.tokenClass else {
@@ -177,18 +304,23 @@ public func openJSON(_ envelope: Envelope, state: SealState) throws -> JSONValue
     }
 
     guard let ephemeralPublicKey = Data(base64Encoded: envelope.ephemeralPublicKeyBase64.trimmingCharacters(in: .whitespacesAndNewlines)),
+          let clientNonce = Data(base64Encoded: envelope.clientNonceBase64.trimmingCharacters(in: .whitespacesAndNewlines)),
           let nonceData = Data(base64Encoded: envelope.nonceBase64.trimmingCharacters(in: .whitespacesAndNewlines)),
           let ciphertextAndTag = Data(base64Encoded: envelope.ciphertextBase64.trimmingCharacters(in: .whitespacesAndNewlines))
     else {
         throw ZKLLMGatewayError.base64("invalid base64 envelope field")
     }
 
-    guard ephemeralPublicKey.count == 32, nonceData.count == 12, ciphertextAndTag.count >= 16 else {
+    guard ephemeralPublicKey.count == 32, clientNonce.count == 32, nonceData.count == 12, ciphertextAndTag.count >= 16 else {
         throw ZKLLMGatewayError.crypto("invalid envelope fields")
     }
 
     guard ephemeralPublicKey == state.ephemeralPublicKey else {
         throw ZKLLMGatewayError.crypto("unexpected eph_pubkey in response")
+    }
+
+    guard clientNonce == state.clientNonce else {
+        throw ZKLLMGatewayError.crypto("client nonce mismatch")
     }
 
     let ciphertext = ciphertextAndTag.prefix(ciphertextAndTag.count - 16)
@@ -202,7 +334,15 @@ public func openJSON(_ envelope: Envelope, state: SealState) throws -> JSONValue
     let padded = try ChaChaPoly.open(
         sealedBox,
         using: SymmetricKey(data: state.responseKey),
-        authenticating: makeAAD(version: envelope.version, tokenClass: envelope.tokenClass, direction: .response)
+        authenticating: makeAAD(
+            version: envelope.version,
+            tokenClass: envelope.tokenClass,
+            direction: .response,
+            requestID: state.requestID,
+            clientNonce: state.clientNonce,
+            ephemeralPublicKey: state.ephemeralPublicKey,
+            gatewayPublicKey: state.gatewayPublicKey
+        )
     )
 
     let raw = try unpadPayload(padded)
@@ -220,5 +360,9 @@ public func openJSON<T: Decodable>(_ envelope: Envelope, state: SealState, as ty
 }
 
 private func randomNonceData() -> Data {
-    Data((0..<12).map { _ in UInt8.random(in: UInt8.min...UInt8.max) })
+    randomBytes(count: 12)
+}
+
+private func randomBytes(count: Int) -> Data {
+    Data((0..<count).map { _ in UInt8.random(in: UInt8.min...UInt8.max) })
 }

@@ -102,12 +102,17 @@ final class AppGatewayTests: XCTestCase {
             let body = try appGatewayRequestBody(from: request)
             let requestEnvelope = try JSONDecoder().decode(Envelope.self, from: body)
             let ephData = try XCTUnwrap(Data(base64Encoded: requestEnvelope.ephemeralPublicKeyBase64))
+            let clientNonce = try XCTUnwrap(Data(base64Encoded: requestEnvelope.clientNonceBase64))
             let ephPublicKey = try Curve25519.KeyAgreement.PublicKey(rawRepresentation: ephData)
             let sharedSecret = try gatewayPrivateKey.sharedSecretFromKeyAgreement(with: ephPublicKey)
             let responseKey = deriveKey(
                 sharedSecret: sharedSecret,
                 tokenClass: requestEnvelope.tokenClass,
-                direction: .response
+                direction: .response,
+                requestID: requestEnvelope.requestID,
+                clientNonce: clientNonce,
+                ephemeralPublicKey: ephData,
+                gatewayPublicKey: gatewayPrivateKey.publicKey.rawRepresentation
             )
 
             let payload = JSONValue.object(
@@ -115,7 +120,7 @@ final class AppGatewayTests: XCTestCase {
                     "kind": .string("ok"),
                     "response": .object(
                         [
-                            "request_id": .string("req-123"),
+                            "request_id": .string(requestEnvelope.requestID),
                             "model": .string("gpt-4o-mini"),
                             "output": .string("hello from the gateway"),
                             "billed_token_class": .string(requestEnvelope.tokenClass.rawValue),
@@ -137,7 +142,11 @@ final class AppGatewayTests: XCTestCase {
                 authenticating: makeAAD(
                     version: requestEnvelope.version,
                     tokenClass: requestEnvelope.tokenClass,
-                    direction: .response
+                    direction: .response,
+                    requestID: requestEnvelope.requestID,
+                    clientNonce: clientNonce,
+                    ephemeralPublicKey: ephData,
+                    gatewayPublicKey: gatewayPrivateKey.publicKey.rawRepresentation
                 )
             )
 
@@ -147,6 +156,8 @@ final class AppGatewayTests: XCTestCase {
             let envelope = Envelope(
                 version: requestEnvelope.version,
                 tokenClass: requestEnvelope.tokenClass,
+                requestID: requestEnvelope.requestID,
+                clientNonceBase64: requestEnvelope.clientNonceBase64,
                 ephemeralPublicKeyBase64: requestEnvelope.ephemeralPublicKeyBase64,
                 nonceBase64: nonceData.base64EncodedString(),
                 ciphertextBase64: ciphertext.base64EncodedString()

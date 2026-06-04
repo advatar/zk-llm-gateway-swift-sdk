@@ -8,6 +8,7 @@ final class CryptoTests: XCTestCase {
         let gatewayPublicKey = try GatewayPublicKey(rawRepresentation: gatewayPrivateKey.publicKey.rawRepresentation)
 
         let payload: JSONValue = [
+            "request_id": .string(UUID().uuidString.lowercased()),
             "hello": "world",
             "n": 123,
         ]
@@ -25,9 +26,18 @@ final class CryptoTests: XCTestCase {
         ]
 
         let ephemeralPublicKeyData = try XCTUnwrap(Data(base64Encoded: sealed.envelope.ephemeralPublicKeyBase64))
+        let clientNonce = try XCTUnwrap(Data(base64Encoded: sealed.envelope.clientNonceBase64))
         let ephemeralPublicKey = try Curve25519.KeyAgreement.PublicKey(rawRepresentation: ephemeralPublicKeyData)
         let sharedSecret = try gatewayPrivateKey.sharedSecretFromKeyAgreement(with: ephemeralPublicKey)
-        let responseKey = deriveKey(sharedSecret: sharedSecret, tokenClass: .c1024, direction: .response)
+        let responseKey = deriveKey(
+            sharedSecret: sharedSecret,
+            tokenClass: .c1024,
+            direction: .response,
+            requestID: sealed.envelope.requestID,
+            clientNonce: clientNonce,
+            ephemeralPublicKey: ephemeralPublicKeyData,
+            gatewayPublicKey: gatewayPrivateKey.publicKey.rawRepresentation
+        )
 
         let paddedResponse = try padPayload(
             responsePayload.toData(),
@@ -39,7 +49,15 @@ final class CryptoTests: XCTestCase {
             paddedResponse,
             using: SymmetricKey(data: responseKey),
             nonce: try ChaChaPoly.Nonce(data: nonceData),
-            authenticating: makeAAD(version: sealed.envelope.version, tokenClass: .c1024, direction: .response)
+            authenticating: makeAAD(
+                version: sealed.envelope.version,
+                tokenClass: .c1024,
+                direction: .response,
+                requestID: sealed.envelope.requestID,
+                clientNonce: clientNonce,
+                ephemeralPublicKey: ephemeralPublicKeyData,
+                gatewayPublicKey: gatewayPrivateKey.publicKey.rawRepresentation
+            )
         )
 
         var ciphertext = Data(sealedResponse.ciphertext)
@@ -48,6 +66,8 @@ final class CryptoTests: XCTestCase {
         let responseEnvelope = Envelope(
             version: sealed.envelope.version,
             tokenClass: sealed.envelope.tokenClass,
+            requestID: sealed.envelope.requestID,
+            clientNonceBase64: sealed.envelope.clientNonceBase64,
             ephemeralPublicKeyBase64: sealed.envelope.ephemeralPublicKeyBase64,
             nonceBase64: nonceData.base64EncodedString(),
             ciphertextBase64: ciphertext.base64EncodedString()

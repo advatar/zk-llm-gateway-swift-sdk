@@ -15,7 +15,7 @@ This package mirrors the existing Python, Rust, and TypeScript SDK behavior whil
 - Async `GatewayClient` for encrypted `/v1/infer`
 - OpenAI-style chat request/response helpers
 - Dummy and file-backed ticket sources
-- Optional regex-based redaction helpers
+- Optional regex-based redaction helpers that reduce accidental leakage but are not a privacy guarantee
 
 ## Requirements
 

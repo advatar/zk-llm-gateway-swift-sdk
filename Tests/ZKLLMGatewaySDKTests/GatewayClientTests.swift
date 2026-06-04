@@ -80,7 +80,7 @@ final class GatewayClientTests: XCTestCase {
             let responsePayload = JSONValue.object([
                 "kind": .string("ok"),
                 "response": .object([
-                    "request_id": .string("req-123"),
+                    "request_id": requestPayload["request_id"] ?? .string(""),
                     "model": .string("gpt-4o-mini"),
                     "output": .string("hello from the gateway"),
                     "billed_token_class": .string(requestEnvelope.tokenClass.rawValue),
@@ -248,13 +248,20 @@ private func decryptRequestPayload(
     guard let ephData = Data(base64Encoded: requestEnvelope.ephemeralPublicKeyBase64) else {
         throw URLError(.cannotDecodeContentData)
     }
+    guard let clientNonce = Data(base64Encoded: requestEnvelope.clientNonceBase64) else {
+        throw URLError(.cannotDecodeContentData)
+    }
 
     let ephPublicKey = try Curve25519.KeyAgreement.PublicKey(rawRepresentation: ephData)
     let sharedSecret = try gatewayPrivateKey.sharedSecretFromKeyAgreement(with: ephPublicKey)
     let requestKey = deriveKey(
         sharedSecret: sharedSecret,
         tokenClass: requestEnvelope.tokenClass,
-        direction: .request
+        direction: .request,
+        requestID: requestEnvelope.requestID,
+        clientNonce: clientNonce,
+        ephemeralPublicKey: ephData,
+        gatewayPublicKey: gatewayPrivateKey.publicKey.rawRepresentation
     )
 
     guard let nonceData = Data(base64Encoded: requestEnvelope.nonceBase64),
@@ -276,7 +283,11 @@ private func decryptRequestPayload(
         authenticating: makeAAD(
             version: requestEnvelope.version,
             tokenClass: requestEnvelope.tokenClass,
-            direction: .request
+            direction: .request,
+            requestID: requestEnvelope.requestID,
+            clientNonce: clientNonce,
+            ephemeralPublicKey: ephData,
+            gatewayPublicKey: gatewayPrivateKey.publicKey.rawRepresentation
         )
     )
 
@@ -292,13 +303,20 @@ private func encryptResponsePayload(
     guard let ephData = Data(base64Encoded: requestEnvelope.ephemeralPublicKeyBase64) else {
         throw URLError(.cannotDecodeContentData)
     }
+    guard let clientNonce = Data(base64Encoded: requestEnvelope.clientNonceBase64) else {
+        throw URLError(.cannotDecodeContentData)
+    }
 
     let ephPublicKey = try Curve25519.KeyAgreement.PublicKey(rawRepresentation: ephData)
     let sharedSecret = try gatewayPrivateKey.sharedSecretFromKeyAgreement(with: ephPublicKey)
     let responseKey = deriveKey(
         sharedSecret: sharedSecret,
         tokenClass: requestEnvelope.tokenClass,
-        direction: .response
+        direction: .response,
+        requestID: requestEnvelope.requestID,
+        clientNonce: clientNonce,
+        ephemeralPublicKey: ephData,
+        gatewayPublicKey: gatewayPrivateKey.publicKey.rawRepresentation
     )
 
     let paddedResponse = try padPayload(
@@ -314,7 +332,11 @@ private func encryptResponsePayload(
         authenticating: makeAAD(
             version: requestEnvelope.version,
             tokenClass: requestEnvelope.tokenClass,
-            direction: .response
+            direction: .response,
+            requestID: requestEnvelope.requestID,
+            clientNonce: clientNonce,
+            ephemeralPublicKey: ephData,
+            gatewayPublicKey: gatewayPrivateKey.publicKey.rawRepresentation
         )
     )
 
@@ -324,6 +346,8 @@ private func encryptResponsePayload(
     return Envelope(
         version: requestEnvelope.version,
         tokenClass: requestEnvelope.tokenClass,
+        requestID: requestEnvelope.requestID,
+        clientNonceBase64: requestEnvelope.clientNonceBase64,
         ephemeralPublicKeyBase64: requestEnvelope.ephemeralPublicKeyBase64,
         nonceBase64: nonceData.base64EncodedString(),
         ciphertextBase64: ciphertext.base64EncodedString()

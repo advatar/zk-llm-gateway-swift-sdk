@@ -137,11 +137,17 @@ public final class GatewayClient {
 
         let decrypted = try openJSON(responseEnvelope, state: sealed.state)
 
-        if let payload = try parseGatewayPayload(from: decrypted) {
-            switch payload {
+        if let gatewayPayload = try parseGatewayPayload(from: decrypted) {
+            switch gatewayPayload {
             case let .ok(response):
+                guard response.requestID == payload.requestID else {
+                    throw ZKLLMGatewayError.protocolViolation("gateway response request_id mismatch")
+                }
                 return try JSONValue.fromEncodable(response)
             case let .err(error):
+                if let responseRequestID = error.requestID, responseRequestID != payload.requestID {
+                    throw ZKLLMGatewayError.protocolViolation("gateway error request_id mismatch")
+                }
                 throw ZKLLMGatewayError.gateway(
                     code: error.code ?? "gateway_error",
                     message: error.message ?? "unknown error"
