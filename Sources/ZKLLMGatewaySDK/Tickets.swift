@@ -65,12 +65,50 @@ public actor FileTicketSource: TicketSource {
             proof = object["proof"]?.stringValue
             proofB64 = object["proof_b64"]?.stringValue
         }
+
+        init(ticket: ZkTicket) {
+            commitmentRoot = ticket.commitmentRoot
+            commitmentRootB64 = nil
+            nullifier = ticket.nullifier
+            nullifierB64 = nil
+            tokenClass = ticket.tokenClass.rawValue
+            proof = ticket.proof
+            proofB64 = nil
+        }
+
+        var jsonValue: JSONValue {
+            var object: [String: JSONValue] = [:]
+            if let commitmentRoot {
+                object["commitment_root"] = .string(commitmentRoot)
+            }
+            if let commitmentRootB64 {
+                object["commitment_root_b64"] = .string(commitmentRootB64)
+            }
+            if let nullifier {
+                object["nullifier"] = .string(nullifier)
+            }
+            if let nullifierB64 {
+                object["nullifier_b64"] = .string(nullifierB64)
+            }
+            if let tokenClass {
+                object["token_class"] = .string(tokenClass)
+            }
+            if let proof {
+                object["proof"] = .string(proof)
+            }
+            if let proofB64 {
+                object["proof_b64"] = .string(proofB64)
+            }
+            return .object(object)
+        }
     }
 
+    private let url: URL
     private var tickets: [RawTicket]
 
     public init(path: String) throws {
         let url = URL(fileURLWithPath: path)
+        self.url = url
         let data = try Data(contentsOf: url)
         let json = try JSONValue.fromData(data)
         let rawTickets = json.arrayValue?.compactMap(RawTicket.init(jsonValue:)) ?? []
@@ -83,6 +121,12 @@ public actor FileTicketSource: TicketSource {
 
     public func remaining() -> Int {
         tickets.count
+    }
+
+    public func appendTickets(_ newTickets: [ZkTicket]) throws {
+        guard !newTickets.isEmpty else { return }
+        tickets.append(contentsOf: newTickets.map(RawTicket.init(ticket:)))
+        try persist()
     }
 
     public func nextTicket(tokenClass: TokenClass) async throws -> ZkTicket {
@@ -111,13 +155,15 @@ public actor FileTicketSource: TicketSource {
             throw ZKLLMGatewayError.ticketExhausted("ticket pool exhausted")
         }
 
-        let raw = tickets.remove(at: index)
+        let raw = tickets[index]
 
         do {
             let normalized = try normalize(rawTicket: raw, fallbackTokenClass: tokenClass)
             guard normalized.tokenClass == tokenClass else {
                 throw ZKLLMGatewayError.ticketExhausted("ticket token_class mismatch")
             }
+            tickets.remove(at: index)
+            try persist()
             return normalized
         } catch let error as ZKLLMGatewayError {
             switch error {
@@ -149,6 +195,20 @@ public actor FileTicketSource: TicketSource {
             tokenClass: tokenClass,
             proof: proof
         )
+    }
+
+    private func persist() throws {
+        let json = JSONValue.array(tickets.map(\.jsonValue))
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        let data = try encoder.encode(json)
+        let directory = url.deletingLastPathComponent()
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        do {
+            try data.write(to: url, options: .atomic)
+        } catch {
+            throw ZKLLMGatewayError.protocolViolation("persist ticket file: \(error.localizedDescription)")
+        }
     }
 }
 
