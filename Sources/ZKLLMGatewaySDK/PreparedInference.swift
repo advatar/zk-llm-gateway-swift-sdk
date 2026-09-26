@@ -59,6 +59,11 @@ public struct PreparedInference: Sendable {
             requestWithoutTicket: .object(wire)
         )
     }
+
+    public func authorize(using provider: any PreparedAuthorizationProviding) async throws -> AuthorizedPreparedInference {
+        let authorization = try await provider.authorize(self)
+        return try AuthorizedPreparedInference(prepared: self, authorization: authorization)
+    }
 }
 
 public struct PreparedAuthorization: Sendable {
